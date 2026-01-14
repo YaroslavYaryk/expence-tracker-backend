@@ -9,7 +9,10 @@ def tzinfo():
 
 def month_range_kyiv(month: str) -> tuple[datetime, datetime]:
     # month: YYYY-MM
-    y, m = month.split("-")
+    try:
+        y, m, d = month.split("-")
+    except Exception:
+        y, m = month.split("-")
     year = int(y)
     mon = int(m)
     start_local = datetime(year, mon, 1, 0, 0, 0, tzinfo=tzinfo())

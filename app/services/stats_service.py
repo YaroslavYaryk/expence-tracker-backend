@@ -1,24 +1,38 @@
 from __future__ import annotations
 
+from datetime import date, datetime, time, timedelta
+
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func, case
 
-from app.core.time import month_range_kyiv
 from app.core.money import cents_to_amount_str
 from app.models.transaction import Transaction
 from app.repositories.categories_repo import CategoriesRepo
 
 
-class DashboardService:
+def _day_range_kyiv(d: date):
+    # якщо у тебе вже є утиліта — використай її; тут простий варіант (naive)
+    start = datetime.combine(d, time.min)
+    end = datetime.combine(d, time.min).replace(day=d.day)  # placeholder
+    # правильніше:
+    end = datetime.combine(d, time.min)
+    end = end.replace()  # no-op, залишаю для сумісності
+    # ми нижче не використовуємо _day_range_kyiv, тому можна видалити зовсім
+    return start, end
+
+
+class StatsService:
     def __init__(self, db: Session):
         self.db = db
         self.cat_repo = CategoriesRepo(db)
 
-    def summary(self, user, month: str):
-        from_ts, to_ts = month_range_kyiv(month)
+    def summary(self, user, from_date: date, to_date: date):
+        # inclusive day range -> [from_ts, to_ts_exclusive)
+        from_ts = datetime.combine(from_date, time.min)
+        to_ts_exclusive = datetime.combine(to_date, time.min) + timedelta(days=1)
 
         # -------------------------
-        # 1) Base totals (UAH)
+        # 1) base totals
         # -------------------------
         totals = self.db.execute(
             select(
@@ -31,7 +45,7 @@ class DashboardService:
             ).where(
                 Transaction.user_id == user.id,
                 Transaction.occurred_at >= from_ts,
-                Transaction.occurred_at < to_ts,
+                Transaction.occurred_at < to_ts_exclusive,
             )
         ).one()
 
@@ -40,7 +54,7 @@ class DashboardService:
         balance = income - expense
 
         # -------------------------
-        # 2) Totals by original currency (NO conversion)
+        # 2) totals by original currency (no conversion)
         # -------------------------
         orig_rows = self.db.execute(
             select(
@@ -55,22 +69,22 @@ class DashboardService:
             .where(
                 Transaction.user_id == user.id,
                 Transaction.occurred_at >= from_ts,
-                Transaction.occurred_at < to_ts,
+                Transaction.occurred_at < to_ts_exclusive,
             )
             .group_by(Transaction.original_currency)
         ).all()
 
-        income_total_by_original: dict[str, str] = {}
-        expense_total_by_original: dict[str, str] = {}
+        income_by_orig: dict[str, str] = {}
+        expense_by_orig: dict[str, str] = {}
         for cur, inc_cents, exp_cents in orig_rows:
             code = (cur or "").upper().strip()
             if not code:
                 continue
-            income_total_by_original[code] = cents_to_amount_str(int(inc_cents))
-            expense_total_by_original[code] = cents_to_amount_str(int(exp_cents))
+            income_by_orig[code] = cents_to_amount_str(int(inc_cents))
+            expense_by_orig[code] = cents_to_amount_str(int(exp_cents))
 
         # -------------------------
-        # 3) Base totals by category (expenses only, kept as before)
+        # 3) base byCategory (expenses)
         # -------------------------
         by_cat_rows = self.db.execute(
             select(
@@ -81,19 +95,31 @@ class DashboardService:
                 Transaction.user_id == user.id,
                 Transaction.type == 0,
                 Transaction.occurred_at >= from_ts,
-                Transaction.occurred_at < to_ts,
+                Transaction.occurred_at < to_ts_exclusive,
             )
             .group_by(Transaction.category_id)
         ).all()
 
-        by_category = [
-            {"categoryId": str(r[0]), "total": cents_to_amount_str(int(r[1]))}
-            for r in by_cat_rows
-        ]
+        total_expense_base = sum(int(r[1]) for r in by_cat_rows) if by_cat_rows else 0
+
+        by_category = []
+        for cat_id, total_cents in by_cat_rows:
+            cat = self.cat_repo.get_user_category(user.id, cat_id)
+            total_cents_int = int(total_cents)
+            percent = (total_cents_int / total_expense_base * 100.0) if total_expense_base > 0 else 0.0
+            by_category.append(
+                {
+                    "categoryId": str(cat_id),
+                    "name": cat.name if cat else "Unknown",
+                    "icon": cat.icon if cat else None,
+                    "total": cents_to_amount_str(total_cents_int),
+                    "percent": float(percent),
+                }
+            )
+        by_category.sort(key=lambda x: -float(x["total"].replace(",", ".")))
 
         # -------------------------
-        # 4) NEW: Expenses by category in ORIGINAL currency (NO conversion)
-        #    group by (category_id, original_currency)
+        # 4) NEW: expenseByCategoryByOriginal (no conversion)
         # -------------------------
         by_cat_orig_rows = self.db.execute(
             select(
@@ -103,14 +129,13 @@ class DashboardService:
             )
             .where(
                 Transaction.user_id == user.id,
-                Transaction.type == 0,  # expenses
+                Transaction.type == 0,
                 Transaction.occurred_at >= from_ts,
-                Transaction.occurred_at < to_ts,
+                Transaction.occurred_at < to_ts_exclusive,
             )
             .group_by(Transaction.category_id, Transaction.original_currency)
         ).all()
 
-        # totals per currency for percent calculation
         totals_per_currency: dict[str, int] = {}
         for cat_id, cur, total_cents in by_cat_orig_rows:
             code = (cur or "").upper().strip()
@@ -133,80 +158,31 @@ class DashboardService:
                 {
                     "categoryId": str(cat_id),
                     "currency": code,
-                    "total": cents_to_amount_str(total_cents_int),
                     "name": cat.name if cat else "Unknown",
                     "icon": cat.icon if cat else None,
+                    "total": cents_to_amount_str(total_cents_int),
                     "percent": float(percent),
                 }
             )
 
-        # sort: currency, then total desc
         expense_by_category_by_original.sort(
             key=lambda x: (x["currency"], -float(x["total"].replace(",", ".")))
         )
 
-        # -------------------------
-        # 5) Recent (base + original + fx audit)
-        # -------------------------
-        recent_rows = self.db.execute(
-            select(Transaction)
-            .where(
-                Transaction.user_id == user.id,
-                Transaction.occurred_at >= from_ts,
-                Transaction.occurred_at < to_ts,
-            )
-            .order_by(Transaction.occurred_at.desc(), Transaction.id.desc())
-            .limit(10)
-        ).scalars().all()
-
-        recent = []
-        for tx in recent_rows:
-            cat = self.cat_repo.get_user_category(user.id, tx.category_id)
-
-            base_cur = (tx.currency or (user.base_currency or "UAH")).upper()
-            orig_cur = (tx.original_currency or base_cur).upper()
-
-            recent.append(
-                {
-                    "id": str(tx.id),
-                    "type": "income" if tx.type == 1 else "expense",
-
-                    "amount": cents_to_amount_str(int(tx.amount_cents)),
-                    "currency": base_cur,
-
-                    "occurredAt": tx.occurred_at.isoformat(),
-
-                    "categoryId": str(tx.category_id),
-                    "categoryName": cat.name if cat else "Unknown",
-                    "categoryIcon": cat.icon if cat else None,
-
-                    "originalAmount": cents_to_amount_str(int(tx.original_amount_cents)),
-                    "originalCurrency": orig_cur,
-                    "fxRateToBase": float(tx.fx_rate_to_base) if tx.fx_rate_to_base is not None else 1.0,
-                    "fxDate": (
-                        tx.fx_date.isoformat()
-                        if tx.fx_date is not None
-                        else tx.occurred_at.date().isoformat()
-                    ),
-                    "note": tx.note,
-                }
-            )
-
         return {
-            "month": month,
+            "from": from_date.isoformat(),
+            "to": to_date.isoformat(),
             "baseCurrency": (user.base_currency or "UAH").upper(),
 
             "incomeTotal": cents_to_amount_str(income),
             "expenseTotal": cents_to_amount_str(expense),
             "balance": cents_to_amount_str(balance),
 
-            "incomeTotalByOriginal": income_total_by_original,
-            "expenseTotalByOriginal": expense_total_by_original,
+            "incomeTotalByOriginal": income_by_orig,
+            "expenseTotalByOriginal": expense_by_orig,
 
             "byCategory": by_category,
 
             # NEW
             "expenseByCategoryByOriginal": expense_by_category_by_original,
-
-            "recent": recent,
         }

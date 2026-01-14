@@ -4,35 +4,44 @@ from typing import Literal, Optional
 BudgetStatus = Literal["on_track", "warning", "over"]
 
 
-class BudgetItemDto(BaseModel):
+class BudgetDto(BaseModel):
     id: str
+    month: str
+
     categoryId: str
     categoryName: str
     categoryIcon: str | None = None
+
+    # base amounts (analytics)
     limit: str
     spent: str
     remaining: str
-    status: BudgetStatus
-    currency: str = Field(default="UAH", min_length=3, max_length=8)  # input currency
+    status: str
+    baseCurrency: str
 
+    # original input
+    originalLimit: str
+    originalCurrency: str
+    fxRateToBase: float
+    fxDate: str
 
-
-class BudgetsResponse(BaseModel):
-    month: str
-    items: list[BudgetItemDto]
-
-
-class BudgetCreate(BaseModel):
-    month: str = Field(min_length=7, max_length=7)  # YYYY-MM
-    categoryId: str
-    limit: str
-    currency: str = Field(default="CZK", min_length=3, max_length=8)  # input currency
-
+    # NEW: expenses breakdown for this category in ORIGINAL currencies (no conversion)
+    spentByOriginal: dict[str, str]
 
 class BudgetCreateResponse(BaseModel):
     id: str
 
+class BudgetsResponse(BaseModel):
+    items: list[BudgetDto]
+
+
+class BudgetCreate(BaseModel):
+    month: str
+    categoryId: str
+    limit: str
+    currency: str  # original currency
+
 
 class BudgetUpdate(BaseModel):
-    limit: Optional[str] = None
-    currency: Optional[str] = Field(default=None, min_length=3, max_length=8)  # optional input currency change
+    limit: str
+    currency: str  # original currency

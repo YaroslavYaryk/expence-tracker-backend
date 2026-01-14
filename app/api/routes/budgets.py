@@ -7,6 +7,7 @@ from app.core.security import get_current_user
 from app.services.budgets_service import BudgetsService, month_to_first_day as month_to_date_first
 from app.schemas.budget import BudgetsResponse, BudgetCreate, BudgetCreateResponse, BudgetUpdate
 
+
 router = APIRouter(prefix="/budgets", tags=["budgets"])
 
 
@@ -17,31 +18,43 @@ def list_budgets(
     db: Session = Depends(get_db),
 ):
     svc = BudgetsService(db)
-    items = svc.list_with_progress(user, month)
-    return {"month": month, "items": items}
+    items = svc.list(user, month)
+    return items
 
 
-@router.post("")
+@router.post("", response_model=dict)
 async def create_budget(
     payload: BudgetCreate,
     user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     svc = BudgetsService(db)
-    b_id = await svc.create(user=user, payload=payload)
-    return {"id": str(b_id)}
+    b = await svc.create(
+        user=user,
+        month=payload.month,
+        category_id=UUID(payload.categoryId),
+        limit_str=payload.limit,
+        currency=payload.currency,
+    )
+    return {"ok": True, "id": str(b.id)}
 
 
-@router.patch("/{budget_id}")
+@router.patch("/{budget_id}", response_model=dict)
 async def update_budget(
-    budget_id: UUID,
+    budget_id: str,
     payload: BudgetUpdate,
     user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     svc = BudgetsService(db)
-    await svc.update(user=user, budget_id=budget_id, payload=payload)
+    await svc.update(
+        user=user,
+        budget_id=UUID(budget_id),
+        limit_str=payload.limit,
+        currency=payload.currency,
+    )
     return {"ok": True}
+
 
 
 @router.delete("/{budget_id}")
